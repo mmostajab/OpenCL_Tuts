@@ -115,7 +115,7 @@ void main(){
   error = clGetPlatformIDs(1, &platform, nullptr);
 
   cl_device_id device;
-  error = clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, 0, &device, nullptr);
+  error = clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, 1, &device, nullptr);
 
   cl_context_properties cps[3] = {
     CL_CONTEXT_PLATFORM, (cl_context_properties)platform, 0 };
@@ -125,11 +125,79 @@ void main(){
 
   Image in_img = RGBtoRGBA( LoadImage("test.ppm") );
   Image out_img = in_img;
-  const cl_image_format format = { CL_RGBA, CL_UNORM_INT8 };
+  const cl_image_format img_format = { CL_RGBA, CL_UNORM_INT8 };
+  const cl_image_format filter_format = { CL_R, CL_FLOAT };
   cl_image_info info;
 
-  cl_mem d_in_img = clCreateImage2D( ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, &format, in_img.width, in_img.height, 0, const_cast<char*>(in_img.pixel.data()), &cinErr );
-  cl_mem d_out_img = clCreateImage2D( ctx, CL_MEM_WRITE_ONLY, &format, in_img.width, in_img.height, 0, nullptr, &cinErr );
+  const int filter_width = 5;
+  float kernel_integral = 0.0f;
+  const float filter[filter_width][filter_width] = {
+    {0.2f, 0.4f, 0.6f, 0.4f, 0.2f},
+    {0.4f, 0.6f, 0.8f, 0.6f, 0.4f},
+    {0.5f, 0.8f, 1.0f, 0.8f, 0.5f},
+    {0.4f, 0.6f, 0.8f, 0.6f, 0.4f},
+    {0.2f, 0.4f, 0.6f, 0.4f, 0.2f}
+  };
+  for(int i = 0; i < filter_width; i++)
+    for(int j = 0; j < filter_width; j++)
+      kernel_integral += filter[i][j];
 
-  cl_image_desc
+  cl_mem d_in_img = clCreateImage2D( ctx, CL_MEM_READ_ONLY, &img_format, in_img.width, in_img.height, 0, nullptr, &error );
+  CheckError(error);
+  cl_mem d_filter = clCreateBuffer( ctx, CL_MEM_READ_ONLY, filter_width * filter_width * sizeof(float), 0, &error );
+  CheckError(error);
+  cl_mem d_out_img = clCreateImage2D( ctx, CL_MEM_WRITE_ONLY, &img_format, in_img.width, in_img.height, 0, nullptr, &error );
+  CheckError(error);
+
+  CheckError(error);
+
+  size_t img_origin[3] = { 0, 0, 0 };
+  size_t img_region[3] = { in_img.width, in_img.height, 1 };
+  clEnqueueWriteImage( q, d_in_img, CL_TRUE, img_origin, img_region, in_img.width * 4 * sizeof(char), in_img.height * in_img.width * 4 * sizeof(char),  const_cast<char*>(in_img.pixel.data()), 0, nullptr, nullptr );
+  CheckError(error);
+  
+  clEnqueueWriteBuffer( q, d_filter, CL_TRUE, 0, filter_width * filter_width * sizeof(float), filter, 0, nullptr, nullptr);
+  CheckError(error);
+
+  cl_sampler sampler = clCreateSampler( ctx, CL_FALSE, CL_ADDRESS_NONE, CL_FILTER_NEAREST, &error );
+  CheckError(error);
+
+  // Reading and compiling the kernel
+  std::ifstream sourceFile("convolution_kernel.cl");
+  if(!sourceFile){
+    std::cout << "Cannot read find the convolution_kernel.cl file\n";
+    exit(0);
+  }
+  std::string source_str(std::istreambuf_iterator<char>(sourceFile), (std::istreambuf_iterator<char>()));
+  const char* source = source_str.c_str();
+
+  cl_program prg = clCreateProgramWithSource( ctx, 1, &source, nullptr, &error );
+  CheckError(error);
+
+  error = clBuildProgram( prg, 0, nullptr, nullptr, nullptr, nullptr );
+  CheckError(error);
+
+  cl_kernel kernel = clCreateKernel( prg, "convolution", &error );
+  CheckError(error);
+
+  clSetKernelArg( kernel, 0, sizeof(cl_mem), &d_in_img );
+  clSetKernelArg( kernel, 1, sizeof(cl_mem), &d_out_img );
+  clSetKernelArg( kernel, 2, sizeof(cl_int), &in_img.width );
+  clSetKernelArg( kernel, 3, sizeof(cl_int), &in_img.height );
+  clSetKernelArg( kernel, 4, sizeof(cl_mem), &d_filter );
+  clSetKernelArg( kernel, 5, sizeof(cl_int), &filter_width);
+  clSetKernelArg( kernel, 6, sizeof(cl_float), &kernel_integral);
+  clSetKernelArg( kernel, 7, sizeof(cl_sampler), &sampler);
+
+  
+  size_t localws[2] = { 16, 16 };
+  size_t globalws[2] = { (in_img.width / 16 + 1) * 16, (in_img.height / 16 + 1) * 16 };
+  error = clEnqueueNDRangeKernel( q, kernel, 2, nullptr, globalws,localws, 0, nullptr, nullptr );
+  CheckError(error);
+
+  error = clEnqueueReadImage( q, d_out_img, CL_TRUE, img_origin, img_region, in_img.width * 4 * sizeof(char), in_img.height * in_img.width * 4 * sizeof(char), const_cast<char*>(out_img.pixel.data()), 0, nullptr, nullptr );
+  CheckError(error);
+
+  SaveImage( RGBAtoRGB(out_img), "output.ppm" );
+
 }
